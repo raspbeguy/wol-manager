@@ -42,26 +42,39 @@ echo "--- install"
 expect "the configuration file is readable by root only" "-rw-------" "$("$SSH" 'ls -l /etc/config/wol_manager' | cut -c1-10)"
 expect "the default configuration passes the check" OK "$("$SSH" wol-manager check)"
 
-"$SSH" 'uci batch' <<'EOF'
-set wol_manager.nas=host
-set wol_manager.nas.mac=02:00:00:00:00:01
-set wol_manager.pc=host
-set wol_manager.pc.mac=02:00:00:00:00:02
-set wol_manager.broken=host
-set wol_manager.broken.mac=02:00:00:00:00:03
-set wol_manager.broken.iface=nosuchif0
-set wol_manager.bureau=hostlist
-add_list wol_manager.bureau.host=nas
-add_list wol_manager.bureau.host=pc
-set wol_manager.labo=hostlist
-add_list wol_manager.labo.host=nas
-add_list wol_manager.labo.host=broken
-set wol_manager.alice=user
-add_list wol_manager.alice.allow=bureau
-set wol_manager.bob=user
-add_list wol_manager.bob.allow=labo
-commit wol_manager
+# Written whole rather than with `uci add_list`, so a second run on the same VM
+# starts from the same configuration instead of doubling every list.
+"$SSH" 'cat > /etc/config/wol_manager' <<'EOF'
+config globals 'globals'
+	option enabled '1'
+	option iface 'br-lan'
+
+config host 'nas'
+	option mac '02:00:00:00:00:01'
+
+config host 'pc'
+	option mac '02:00:00:00:00:02'
+
+config host 'broken'
+	option mac '02:00:00:00:00:03'
+	option iface 'nosuchif0'
+
+config hostlist 'bureau'
+	list host 'nas'
+	list host 'pc'
+
+config hostlist 'labo'
+	list host 'nas'
+	list host 'broken'
+
+config user 'alice'
+	list allow 'bureau'
+
+config user 'bob'
+	list allow 'labo'
 EOF
+MARK="wol-manager-integration-$$"
+"$SSH" "logger -t wol-manager-test $MARK"
 ALICE=$("$SSH" wol-manager token alice 2>/dev/null)
 BOB=$("$SSH" wol-manager token bob 2>/dev/null)
 
@@ -92,10 +105,11 @@ expect "one magic packet per host of the list, in list order" \
 $(magic 020000000002)" "$frames"
 
 echo "--- syslog"
+log=$("$SSH" logread | sed -n "/$MARK/,\$p")
 expect "each wake is logged" 1 \
-	"$("$SSH" 'logread -e wol-manager' | grep -c 'user=alice list=bureau host=nas mac=02:00:00:00:00:01 iface=br-lan result=ok')"
+	"$(echo "$log" | grep -c 'wol-manager: user=alice list=bureau host=nas mac=02:00:00:00:00:01 iface=br-lan result=ok')"
 expect "a failed wake is logged as an error" 1 \
-	"$("$SSH" 'logread -e wol-manager' | grep -c 'user=bob list=labo host=broken .* result=error')"
+	"$(echo "$log" | grep -c 'wol-manager: user=bob list=labo host=broken .* result=error')"
 
 echo "--- upgrade keeps the configuration"
 "$SSH" 'apk add --allow-untrusted --force-reinstall /tmp/wol-manager.apk' | tail -n 1
