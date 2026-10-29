@@ -31,9 +31,28 @@ cd "$SDK_DIR"
 
 ./scripts/feeds update -a >/dev/null 2>&1 || ./scripts/feeds update -a
 
-# The runtime dependencies come from the feeds; they have to be known packages
-# for wol-manager to be selectable.
-./scripts/feeds install etherwake uhttpd ucode >/dev/null
+# wol-manager is ucode and shell only, so building it needs none of its runtime
+# dependencies. They still have to be known packages for wol-manager to be
+# selectable, and building the real ones compiles openssl, wolfssl and lua for
+# more than half an hour. Build-time STUBS declare them instead. The stubs are
+# never published, the `depends:` metadata of the apk comes from our Makefile
+# regardless, and the integration tests install the real dependencies.
+STUBS="etherwake uhttpd ucode ucode-mod-fs ucode-mod-uci ucode-mod-digest"
+# shellcheck disable=SC2086
+./scripts/feeds uninstall $STUBS >/dev/null 2>&1 || true
+mkdir -p package/wol-manager-dep-stubs
+# shellcheck disable=SC2016
+{
+	printf '%s\n' 'include $(TOPDIR)/rules.mk' 'PKG_NAME:=wol-manager-dep-stubs' 'PKG_VERSION:=0' \
+		'PKG_RELEASE:=1' 'include $(INCLUDE_DIR)/package.mk' 'define Build/Compile' 'endef'
+	for p in $STUBS; do
+		printf 'define Package/%s\n  SECTION:=net\n  CATEGORY:=Network\n  TITLE:=%s (CI build-dependency stub, do not publish)\nendef\n' "$p" "$p"
+		printf 'define Package/%s/install\nendef\n' "$p"
+	done
+	for p in $STUBS; do
+		printf '$(eval $(call BuildPackage,%s))\n' "$p"
+	done
+} > package/wol-manager-dep-stubs/Makefile
 
 # Copy rather than symlink: the SDK lives inside the repo by default, and a
 # link back to the repo root would make the package scan recurse into the SDK.
