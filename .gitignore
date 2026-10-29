@@ -1,0 +1,14 @@
+# Local OpenWrt SDK used by scripts/build-apk.sh
+/.sdk/
+
+# Build artifacts
+*.apk
+
+# Integration VM state, recreated by tests/vm/setup.sh
+/tests/vm/openwrt*.img*
+/tests/vm/id_ed25519*
+/tests/vm/qemu.*
+/tests/vm/.injected
+
+# Local editor/agent state
+/.claude/settings.local.json

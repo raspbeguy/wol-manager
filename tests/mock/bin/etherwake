@@ -1,0 +1,4 @@
+#!/bin/sh
+# Records the call. Fails for AA:BB:CC:DD:EE:03 so tests can cover a partial failure.
+echo "etherwake $*" >> "$MOCK_LOG"
+[ "$3" != "AA:BB:CC:DD:EE:03" ]

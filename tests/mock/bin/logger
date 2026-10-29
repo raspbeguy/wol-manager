@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "logger $*" >> "$MOCK_LOG"

@@ -1,0 +1,16 @@
+{
+	"wol_manager": [
+		{ ".name": "globals", ".type": "globals", "enabled": "1", "iface": "br-lan" },
+		{ ".name": "nas", ".type": "host", "name": "NAS", "mac": "aa:bb:cc:dd:ee:01" },
+		{ ".name": "pc_alice", ".type": "host", "mac": "AA:BB:CC:DD:EE:02", "iface": "lan2" },
+		{ ".name": "srv_labo", ".type": "host", "mac": "AA:BB:CC:DD:EE:03" },
+		{ ".name": "bad", ".type": "host", "mac": "02:00:00:00:00" },
+		{ ".name": "badif", ".type": "host", "mac": "AA:BB:CC:DD:EE:04", "iface": "br-lan; reboot" },
+		{ ".name": "bureau", ".type": "hostlist", "name": "Bureau", "host": [ "nas", "pc_alice" ] },
+		{ ".name": "labo", ".type": "hostlist", "host": [ "nas", "srv_labo", "ghost" ] },
+		{ ".name": "alice", ".type": "user", "allow": [ "bureau" ] },
+		{ ".name": "bob", ".type": "user", "allow": "labo" },
+		{ ".name": "dave", ".type": "user", "enabled": "0", "allow": [ "bureau" ] },
+		{ ".name": "eve", ".type": "user", "allow": [ "missing" ] }
+	]
+}

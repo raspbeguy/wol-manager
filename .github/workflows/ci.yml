@@ -1,0 +1,203 @@
+name: ci
+
+# Triggers:
+#   - push to main / pull_request: lint, unit, build, integration (no release).
+#   - push of a v* tag: the same, then release on success.
+#   - workflow_dispatch: manual re-run; release only fires on a v* tag ref.
+on:
+  push:
+    # GitHub trigger filter-patterns are not regex; the real release gate is the
+    # job-level `if:` on the release job (refs/tags/v* startsWith).
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default; the release job elevates to contents: write at job scope.
+permissions:
+  contents: read
+
+# Cancel superseded branch/PR runs; never cancel a tag run mid-publish, and give
+# manual dispatches their own group so an unrelated push to main can't kill them.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: >-
+    ${{ !startsWith(github.ref, 'refs/tags/')
+        && github.event_name != 'workflow_dispatch' }}
+
+# When bumping OpenWrt, also update IMAGE_URL and IMAGE_GZ in tests/vm/setup.sh.
+env:
+  OPENWRT_SDK_URL: https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+  OPENWRT_SDK_SHA256: 0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c
+  OPENWRT_SDK_CACHE_KEY: openwrt-sdk-25.12.5-x86_64
+  OPENWRT_IMAGE_CACHE_KEY: openwrt-25.12.5-x86-64-ext4-combined
+
+# Every job has a timeout: GitHub's default is 6 hours, and a stalled job would
+# hold the run until then.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container:
+      image: alpine:3.24
+    steps:
+      - name: Install lint tooling
+        run: apk add --no-cache ucode shellcheck grep
+      - uses: actions/checkout@v7
+      - name: Static checks (house style, ucode and shell syntax, VERSION)
+        run: sh scripts/lint.sh
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container:
+      image: alpine:3.24
+    steps:
+      - name: Install ucode
+        run: apk add --no-cache ucode
+      - uses: actions/checkout@v7
+      - name: Unit tests (CLI and CGI against mocks)
+        run: sh tests/unit/run.sh
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [lint, unit]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libncurses-dev libssl-dev python3 \
+            unzip gawk gettext xsltproc rsync wget curl zstd file
+
+      - name: Cache OpenWrt SDK
+        uses: actions/cache@v6
+        with:
+          path: .sdk
+          key: ${{ env.OPENWRT_SDK_CACHE_KEY }}-${{ env.OPENWRT_SDK_SHA256 }}
+
+      - name: Build apk
+        id: build
+        env:
+          SDK_URL: ${{ env.OPENWRT_SDK_URL }}
+          SDK_SHA256: ${{ env.OPENWRT_SDK_SHA256 }}
+          SDK_DIR: ${{ github.workspace }}/.sdk
+        run: sh scripts/build-apk.sh
+
+      - name: Upload apk artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wol-manager-apk
+          path: ${{ steps.build.outputs.apk }}
+          if-no-files-found: error
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wol-manager-apk
+          path: dist
+
+      - name: Install QEMU and SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils openssh-client curl
+
+      - name: Cache OpenWrt image
+        uses: actions/cache@v6
+        with:
+          path: tests/vm/openwrt-25.12.5.img.gz
+          key: ${{ env.OPENWRT_IMAGE_CACHE_KEY }}
+
+      - name: Setup VM image
+        run: tests/vm/setup.sh
+
+      - name: Start VM
+        run: tests/vm/start.sh
+
+      - name: Wait for VM SSH
+        run: TIMEOUT=180 tests/vm/wait.sh
+
+      - name: Integration tests (API, frames on the wire, syslog, upgrade)
+        run: tests/integration/run.sh dist/wol-manager-*.apk
+
+      - name: Capture serial log on failure
+        if: failure()
+        run: tail -200 tests/vm/qemu.log || true
+
+      - name: Stop VM
+        if: always()
+        run: tests/vm/stop.sh
+
+  # Attaches the apk that passed the integration tests to the GitHub Release.
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build, integration]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need the tag object for verify-tag
+
+      # Tags MUST be signed by a key in .github/release-signers.asc. An unsigned
+      # tag, or one signed by a non-listed key, fails before anything is published.
+      - name: Verify tag signature
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if ! grep -q 'BEGIN PGP PUBLIC KEY BLOCK' .github/release-signers.asc; then
+            echo "ERROR: .github/release-signers.asc has no PGP public-key block."
+            exit 1
+          fi
+          export GNUPGHOME=$(mktemp -d)
+          gpg --batch --import .github/release-signers.asc
+          git verify-tag "$TAG"
+
+      - name: Verify tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          WANT="v$(sed -n '1p' VERSION)"
+          [ "$TAG" = "$WANT" ] || {
+            echo "ERROR: tag $TAG does not match VERSION ($WANT). Bump VERSION/CHANGELOG before tagging."
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wol-manager-apk
+          path: dist
+
+      - name: Attach apk to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            case "$TAG" in
+              # Semver: any tag with a hyphen is a pre-release (rc/alpha/beta/dev/...).
+              *-*) PRE=--prerelease ;;
+              *) PRE= ;;
+            esac
+            sh scripts/release-notes.sh "$TAG" > /tmp/release-notes.md
+            if [ -s /tmp/release-notes.md ]; then
+              gh release create "$TAG" $PRE --title "$TAG" --notes-file /tmp/release-notes.md
+            else
+              gh release create "$TAG" $PRE --title "$TAG" --generate-notes
+            fi
+          fi
+          gh release upload "$TAG" dist/wol-manager-*.apk --clobber
+          # Deleting a tag in order to move it reverts its release to a draft, and
+          # `gh release view` succeeds on a draft, so the create branch above is skipped
+          # and the rebuilt apk lands in a release nobody can see or download.
+          gh release edit "$TAG" --draft=false

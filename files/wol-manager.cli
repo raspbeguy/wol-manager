@@ -1,0 +1,121 @@
+#!/usr/bin/ucode
+// Administration tool for wol-manager.
+
+'use strict';
+
+import * as wm from 'wol_manager';
+
+function usage() {
+	warn('Usage: wol-manager <command> [arguments]\n\n',
+		'Commands:\n',
+		'  token <user>          Create a new API token for <user> and print it\n',
+		'  revoke <user>         Remove the API token of <user>\n',
+		'  show [<user>]         Show users, their lists and hosts\n',
+		'  wake <list> [<host>]  Wake all hosts of <list>, or one host of it\n',
+		'  check                 Validate the configuration\n');
+	exit(1);
+}
+
+function die(msg) {
+	warn(`wol-manager: ${msg}\n`);
+	exit(1);
+}
+
+function show_user(cfg, u) {
+	printf('%s (%s, token: %s)\n', u.id,
+		u.enabled ? 'enabled' : 'disabled',
+		u.has_token ? 'set' : 'none');
+
+	if (!length(u.allow))
+		print('  (no list)\n');
+
+	for (let l in u.allow) {
+		printf('  %s: %s\n', l, cfg.lists[l].name);
+
+		for (let h in cfg.lists[l].hosts)
+			printf('    %s  %s  %s (%s)\n', h, cfg.hosts[h].mac, cfg.hosts[h].name, cfg.hosts[h].iface);
+	}
+}
+
+const cmd = ARGV[0];
+const args = slice(ARGV, 1);
+
+switch (cmd) {
+case 'token':
+	if (length(args) != 1)
+		usage();
+
+	const token = wm.token_new(args[0]);
+
+	if (!token)
+		die(`unknown user '${args[0]}'`);
+
+	warn('The previous token of this user is no longer valid. Keep this token, it is not shown again:\n');
+	print(token, '\n');
+	break;
+
+case 'revoke':
+	if (length(args) != 1)
+		usage();
+
+	if (!wm.token_revoke(args[0]))
+		die(`unknown user '${args[0]}'`);
+
+	break;
+
+case 'show':
+	if (length(args) > 1)
+		usage();
+
+	const cfg = wm.load();
+
+	if (length(args) == 1) {
+		if (!cfg.users[args[0]])
+			die(`unknown user '${args[0]}'`);
+
+		show_user(cfg, cfg.users[args[0]]);
+	}
+	else {
+		for (let id in sort(keys(cfg.users)))
+			show_user(cfg, cfg.users[id]);
+	}
+
+	break;
+
+case 'wake':
+	if (length(args) < 1 || length(args) > 2)
+		usage();
+
+	const hosts = wm.targets(wm.load(), args[0], args[1]);
+
+	if (!hosts)
+		die(`unknown list '${args[0]}', or host not in this list`);
+
+	let failed = 0;
+
+	for (let h in hosts) {
+		const r = wm.wake(h, `user=admin-cli list=${args[0]}`);
+
+		printf('%s  %s  %s\n', r.host, r.mac, r.ok ? 'ok' : 'error');
+
+		if (!r.ok)
+			failed++;
+	}
+
+	exit(failed ? 1 : 0);
+
+case 'check':
+	const errors = wm.check();
+
+	for (let e in errors)
+		print(e, '\n');
+
+	if (length(errors))
+		exit(1);
+
+	print('OK\n');
+	break;
+
+default:
+	usage();
+}
